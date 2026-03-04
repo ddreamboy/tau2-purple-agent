@@ -1,90 +1,98 @@
-# A2A Agent Template
+# Tau2 Green Agent
 
-A minimal template for building [A2A (Agent-to-Agent)](https://a2a-protocol.org/latest/) green agents compatible with the [AgentBeats](https://agentbeats.dev) platform.
+A green agent for the [Tau2 benchmark](https://github.com/sierra-research/tau2-bench) on the [AgentBeats](https://agentbeats.dev) platform. Evaluates purple agents on customer service tasks across multiple domains (airline, retail, telecom) using simulated users and real tool environments.
+
+## How it works
+
+The green agent runs tau2 evaluations via the [A2A protocol](https://a2a-protocol.org/latest/):
+
+1. Receives an evaluation request with a purple agent URL and config (domain, number of tasks, etc.)
+2. For each task, creates a simulated user and orchestrates a multi-turn conversation between the user, the purple agent, and the domain environment (tools, databases, policies)
+3. Evaluates whether the purple agent completed the task successfully
+4. Returns pass rate, per-task rewards, and timing metrics
 
 ## Project Structure
 
 ```
 src/
-├─ server.py      # Server setup and agent card configuration
+├─ server.py      # A2A server setup and agent card
 ├─ executor.py    # A2A request handling
-├─ agent.py       # Your agent implementation goes here
+├─ agent.py       # Tau2 evaluation logic and RemoteA2AAgent wrapper
 └─ messenger.py   # A2A messaging utilities
+amber/
+├─ amber-scenario.json5         # Amber scenario (green + purple + gateway)
+├─ amber-manifest-green.json5   # Green agent manifest
+├─ amber-manifest-purple.json5  # Purple agent manifest
+├─ sample.env                   # Environment variable template
+└─ README.md                    # Amber compile and run instructions
 tests/
-└─ test_agent.py  # Agent tests
-Dockerfile            # Docker configuration
-pyproject.toml        # Python dependencies
-amber-manifest.json5  # Amber manifest
-.github/
-└─ workflows/
-   └─ test-and-publish.yml # CI workflow
+└─ test_agent.py  # A2A conformance tests
+setup.sh          # Downloads tau2-bench data for local development
+test_run.py       # Example evaluation request script
+Dockerfile        # Docker image (includes tau2-bench data)
 ```
-
-## Getting Started
-
-1. **Create your repository** - Click "Use this template" to create your own repository from this template
-
-2. **Implement your agent** - Add your agent logic to [`src/agent.py`](src/agent.py)
-
-3. **Configure your agent card** - Fill in your agent's metadata (name, skills, description) in [`src/server.py`](src/server.py)
-
-4. **Fill out your [Amber](https://github.com/RDI-Foundation/amber) manifest** - Update [`amber-manifest.json5`](amber-manifest.json5) to use your agent in Amber scenarios
-
-5. **Write your tests** - Add custom tests for your agent in [`tests/test_agent.py`](tests/test_agent.py)
-
-For a concrete example of implementing a green agent using this template, see this [draft PR](https://github.com/RDI-Foundation/green-agent-template/pull/3).
 
 ## Running Locally
 
 ```bash
+# Clone tau2-bench data
+bash setup.sh
+export TAU2_DATA_DIR=$PWD/tau2-bench/data
+
 # Install dependencies
 uv sync
 
-# Run the server
+# Set API key for the UserSimulator LLM
+export OPENAI_API_KEY=sk-...
+# Or for Gemini:
+# export GEMINI_API_KEY=...
+
+# Start the green agent
 uv run src/server.py
 ```
 
+The server starts on port 9009. You'll need a purple agent running separately (e.g. from [agent-template](https://github.com/RDI-Foundation/agent-template)) to send evaluation requests to.
+
 ## Running with Docker
 
-```bash
-# Build the image
-docker build -t my-agent .
+The Docker image bundles tau2-bench data, so no setup script is needed.
 
-# Run the container
-docker run -p 9009:9009 my-agent
+```bash
+docker build -t tau2-green .
+docker run -p 8081:8081 -e OPENAI_API_KEY=sk-... tau2-green
 ```
+
+## Running with Amber
+
+See [amber/README.md](amber/README.md) for instructions on compiling and running the full scenario (green agent + purple agent + gateway) using the Amber CLI.
+
+## Configuration
+
+The following config parameters can be passed in the evaluation request (or via Amber's `assessment_config`):
+
+| Parameter | Required | Default | Description |
+|-----------|----------|---------|-------------|
+| `domain` | yes | `airline` | `airline`, `retail`, `telecom`, or `mock` |
+| `num_tasks` | no | all | Limit number of tasks to run |
+| `task_ids` | no | all | Specific task IDs to run |
+| `max_steps` | no | `200` | Max orchestrator steps per task |
+| `user_llm` | no | `openai/gpt-4o-mini` | LLM for the UserSimulator (litellm format) |
+| `user_llm_args` | no | `{"temperature": 0.0}` | LLM arguments for the UserSimulator |
+
+To run the full benchmark, submit one evaluation per domain.
 
 ## Testing
 
-Run A2A conformance tests against your agent.
-
 ```bash
-# Install test dependencies
 uv sync --extra test
-
-# Start your agent (uv or docker; see above)
-
-# Run tests against your running agent URL
 uv run pytest --agent-url http://localhost:9009
 ```
 
 ## Publishing
 
-The repository includes a GitHub Actions workflow that automatically builds, tests, and publishes a Docker image of your agent to GitHub Container Registry.
+The CI workflow builds, tests, and publishes to GitHub Container Registry on push to `main` or version tags:
 
-If your agent needs API keys or other secrets, add them in Settings → Secrets and variables → Actions → Repository secrets. They'll be available as environment variables during CI tests.
-
-- **Push to `main`** → publishes `latest` tag:
 ```
-ghcr.io/<your-username>/<your-repo-name>:latest
+ghcr.io/rdi-foundation/tau2-agentbeats:latest
+ghcr.io/rdi-foundation/tau2-agentbeats:1.0.0
 ```
-
-- **Create a git tag** (e.g. `git tag v1.0.0 && git push origin v1.0.0`) → publishes version tags:
-```
-ghcr.io/<your-username>/<your-repo-name>:1.0.0
-ghcr.io/<your-username>/<your-repo-name>:1
-```
-
-Once the workflow completes, find your Docker image in the Packages section (right sidebar of your repository). Configure the package visibility in package settings.
-
-> **Note:** Organization repositories may need package write permissions enabled manually (Settings → Actions → General). Version tags must follow [semantic versioning](https://semver.org/) (e.g., `v1.0.0`).
