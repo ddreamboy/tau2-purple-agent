@@ -1,11 +1,10 @@
 import logging
 import os
 
-from openai import AsyncOpenAI
-
 from a2a.server.tasks import TaskUpdater
 from a2a.types import Message
 from a2a.utils import get_message_text, new_agent_text_message
+from openai import AsyncOpenAI
 
 
 class Agent:
@@ -14,7 +13,9 @@ class Agent:
             api_key=os.environ["LLM_API_KEY"],
             base_url=os.environ.get("LLM_API_URL", "https://routerai.ru/api/v1"),
         )
-        self.model = os.environ.get("LLM_API_BASE_MODEL", "google/gemini-2.5-flash-lite")
+        self.model = os.environ.get(
+            "LLM_API_BASE_MODEL", "google/gemini-2.5-flash-lite"
+        )
         self.messages = []
 
     async def run(self, message: Message, updater: TaskUpdater) -> None:
