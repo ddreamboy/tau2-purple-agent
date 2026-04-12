@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import re
 from typing import Any
 
 from a2a.server.tasks import TaskUpdater
@@ -40,46 +41,14 @@ Before booking, canceling, modifying a flight, or updating baggage:
 
 ---
 
-## AIRLINE POLICY REFERENCE
-
-### Cancellations — allowed ONLY if:
-- Booking was made within the last 24 hours, OR
-- The airline cancelled or significantly changed the flight, OR
-- Passenger is in Business class, OR
-- Passenger has travel insurance AND provides a valid reason (health/weather)
-- All other cases: deny and explain clearly
-
-### Cabin Class Changes
-- Allowed only if NO flight in the reservation has departed yet
-- Must apply the same cabin class to ALL flights in the reservation
-- Cannot do partial upgrades
-
-### Baggage
-- Extra bag fee: $50 per bag
-- Never add bags the user did not explicitly request
-- Always confirm bag count before adding
-
-### Travel Insurance
-- Cost: $30 per passenger
-- MUST be purchased at booking time — cannot be added retroactively
-- Benefit: enables full refund for health or weather-related cancellations
-
-### Human Agent Transfer
-- When requested by user, OR when policy prevents fulfilling a request
-- Action: call `transfer_to_human_agents` tool FIRST, then reply:
-  "YOU ARE BEING TRANSFERRED TO A HUMAN AGENT. PLEASE HOLD ON."
-- Never transfer without calling the tool
-
----
-
 ## TOOL CALL FORMAT
 
 When you need to call a tool, respond with ONLY this JSON — no prose, no explanation:
 
-{"tool_calls": [{"id": "call_1", "name": "tool_name", "arguments": {"arg1": "value1"}}]}
+{"tool_calls":[{"id": "call_1", "name": "tool_name", "arguments": {"arg1": "value1"}}]}
 
 When you receive tool results, they arrive as:
-{"tool_results": [{"id": "call_1", "result": {...}}]}
+{"tool_results":[{"id": "call_1", "result": {...}}]}
 
 After receiving tool results:
 - If the result is an error → inform the user and offer alternatives
@@ -94,21 +63,6 @@ After receiving tool results:
 - When showing flight/booking details, use a clear structured format
 - If you cannot fulfill a request, explain WHY (referencing policy) and proactively offer what you CAN do
 - Never apologize excessively — one acknowledgment is enough
-
----
-
-## EXAMPLE INTERACTION FLOW
-
-User: "I want to cancel my flight"
-Agent: "I'd be happy to help with that. Could you please provide your user ID?"
-
-User: "My ID is 12345"
-Agent: [calls lookup_reservation tool]
-
-After tool result:
-Agent: "I found your reservation: [details]. 
-Before I proceed — this booking was made 3 days ago and is Economy class, so standard cancellation policy applies. 
-Unfortunately, this doesn't qualify for a free cancellation. Would you like me to transfer you to a human agent to discuss options?"
 """
 
 
@@ -118,33 +72,35 @@ class Agent:
             api_key=os.environ["LLM_API_KEY"],
             base_url=os.environ.get("LLM_API_URL", "https://routerai.ru/api/v1"),
         )
-        self.model = os.environ.get(
-            "LLM_API_BASE_MODEL", "google/gemini-2.5-flash-lite"
-        )
-        self.messages: list[dict[str, Any]] = [
-            {"role": "system", "content": SYSTEM_PROMPT}
-        ]
+        self.model = os.environ.get("LLM_API_BASE_MODEL", "google/gemini-2.5-flash-lite")
+        self.messages: list[dict[str, Any]] = [{"role": "system", "content": SYSTEM_PROMPT}]
 
     def _parse_tool_results(self, text: str) -> list[dict] | None:
-        """Try to parse incoming message as tool results."""
         try:
             data = json.loads(text)
-            if "tool_results" in data:
+            if isinstance(data, dict) and "tool_results" in data:
                 return data["tool_results"]
         except (json.JSONDecodeError, TypeError):
             pass
+
+        if self.messages and self.messages[-1].get("tool_calls"):
+            tc_id = self.messages[-1]["tool_calls"][0].get("id", "call_1")
+            try:
+                data = json.loads(text)
+                return [{"id": tc_id, "result": data}]
+            except (json.JSONDecodeError, TypeError):
+                return [{"id": tc_id, "result": {"output": text}}]
+
         return None
 
     def _parse_tool_calls_response(self, text: str) -> list[dict] | None:
-        """Try to parse model response as tool calls JSON."""
         try:
-            clean = text.strip()
-            if clean.startswith("```"):
-                lines = clean.split("\n")
-                clean = "\n".join(lines[1:-1]) if len(lines) > 2 else clean
-            data = json.loads(clean)
-            if "tool_calls" in data:
-                return data["tool_calls"]
+            match = re.search(r"\{.*\}", text, re.DOTALL)
+            if match:
+                clean = match.group(0)
+                data = json.loads(clean)
+                if "tool_calls" in data:
+                    return data["tool_calls"]
         except (json.JSONDecodeError, TypeError, AttributeError):
             pass
         return None
@@ -176,9 +132,7 @@ class Agent:
         except Exception as e:
             logger.error(f"LLM call failed: {e}")
             await updater.complete(
-                new_agent_text_message(
-                    "I'm sorry, I encountred a technical issue. Please try again."
-                )
+                new_agent_text_message("I'm sorry, I encountred a technical issue. Please try again.")
             )
             return
 
@@ -206,19 +160,17 @@ class Agent:
                     ],
                 }
             )
-            payload = json.dumps(
-                {
-                    "tool_calls": [
-                        {
-                            "id": tc.id,
-                            "name": tc.function.name,
-                            "arguments": json.loads(tc.function.arguments),
-                        }
-                        for tc in tool_calls
-                    ]
-                }
-            )
-            logger.info(f"Native tool calls: {payload[:300]}")
+
+            tc = tool_calls[0]
+            args = tc.function.arguments
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except Exception:
+                    args = {}
+
+            payload = json.dumps({"name": tc.function.name, "arguments": args})
+            logger.info(f"Native tool calls mapped: {payload[:300]}")
             await updater.complete(new_agent_text_message(payload))
             return
 
@@ -241,8 +193,10 @@ class Agent:
                     ],
                 }
             )
-            payload = json.dumps({"tool_calls": parsed_tool_calls})
-            logger.info(f"JSON tool calls: {payload[:300]}")
+
+            tc = parsed_tool_calls[0]
+            payload = json.dumps({"name": tc["name"], "arguments": tc.get("arguments", {})})
+            logger.info(f"JSON tool calls mapped: {payload[:300]}")
             await updater.complete(new_agent_text_message(payload))
             return
 
